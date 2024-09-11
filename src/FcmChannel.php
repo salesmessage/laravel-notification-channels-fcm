@@ -7,27 +7,21 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Notifications\Events\NotificationFailed;
 use Illuminate\Notifications\Notification;
 use Illuminate\Support\Arr;
+use Kreait\Firebase\Exception\Messaging\ServerError;
 use Kreait\Firebase\Exception\MessagingException;
 use Kreait\Firebase\Messaging\CloudMessage;
 use Kreait\Firebase\Messaging\Message;
-use Kreait\Firebase\Messaging\MulticastSendReport;
-use Kreait\Firebase\Messaging\SendReport;
 use NotificationChannels\Fcm\Exceptions\CouldNotSendNotification;
+use Psr\Log\LoggerInterface;
 use ReflectionException;
 use Throwable;
 
 class FcmChannel
 {
-    const MAX_TOKEN_PER_REQUEST = 500;
-
-    /**
-     * FcmChannel constructor.
-     *
-     * @param \Illuminate\Contracts\Events\Dispatcher $events
-     */
-    public function __construct(protected Dispatcher $events)
-    {
-        //
+    public function __construct(
+        protected Dispatcher $events,
+        protected LoggerInterface $logger,
+    ) {
     }
 
     /**
@@ -66,25 +60,45 @@ class FcmChannel
         }
 
         $responses = [];
+        $notifiableId = is_a($notifiable, \ArrayAccess::class) ? ($notifiable['id'] ?? null) : null;
 
-        try {
-            $partialTokens = array_chunk($tokens, self::MAX_TOKEN_PER_REQUEST, false);
+        $this->logger->info('FcmChannel.Notification.Sending', [
+            'notifiable' => $notifiableId,
+        ]);
 
-            foreach ($partialTokens as $tokens) {
-                $responses[] = $this->sendToFcmMulticast($fcmMessage, $tokens);
+        $errors = [];
+        foreach ($tokens as $token) {
+            try {
+                $result = $this->sendToFcm($fcmMessage, $token);
+                $this->logger->info('FcmChannel.Notification.Sent', [
+                    'notifiable' => $notifiableId,
+                    'push_token' => substr($token, 0, 10) . '...',
+                    'result' => $result,
+                ]);
+                $responses[] = $result;
+            } catch (MessagingException $exception) {
+                $this->logger->warning('FcmChannel.Notification.MessagingError', [
+                    'notifiable' => $notifiableId,
+                    'error' => $exception->getMessage(),
+                    'code' => $exception->getCode(),
+                ]);
+
+                $this->failedNotification($notifiable, $notification, $exception, $tokens);
+                $errors[] = $exception->getMessage();
+
+            } catch (\Throwable $exception) {
+                $this->logger->error('FcmChannel.Notification.Error', [
+                    'notifiable' => $notifiableId,
+                    'error' => $exception->getMessage(),
+                    'trace' => $exception->getTraceAsString(),
+                    'code' => $exception->getCode(),
+                ]);
+
+                throw $exception;
             }
-
-            /** @var MulticastSendReport $failedMulticastSendReport */
-            foreach (array_filter($responses, fn(MulticastSendReport $report) => $report->hasFailures()) as $failedMulticastSendReport) {
-                /** @var SendReport $failedSendReport */
-                foreach (array_filter($failedMulticastSendReport->getItems(), fn(SendReport $sendReport) => $sendReport->isFailure()) as $failedSendReport) {
-                    $this->failedNotification($notifiable, $notification, $failedSendReport->error(), $failedSendReport->target()->value());
-                }
-            }
-
-        } catch (MessagingException $exception) {
-            $this->failedNotification($notifiable, $notification, $exception, $tokens);
-            throw CouldNotSendNotification::serviceRespondedWithAnError($exception);
+        }
+        if ($errors) {
+            throw CouldNotSendNotification::serviceRespondedWithAnError((new ServerError(implode(' | ', $errors))));
         }
 
         return $responses;
