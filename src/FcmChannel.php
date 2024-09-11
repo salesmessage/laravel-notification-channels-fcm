@@ -18,8 +18,6 @@ use Throwable;
 
 class FcmChannel
 {
-    const MAX_TOKEN_PER_REQUEST = 500;
-
     /**
      * FcmChannel constructor.
      *
@@ -68,10 +66,8 @@ class FcmChannel
         $responses = [];
 
         try {
-            $partialTokens = array_chunk($tokens, self::MAX_TOKEN_PER_REQUEST, false);
-
-            foreach ($partialTokens as $tokens) {
-                $responses[] = $this->sendToFcmMulticast($fcmMessage, $tokens);
+            foreach ($tokens as $token) {
+                $responses[] = $this->sendToFcm($fcmMessage, $token);
             }
 
             /** @var MulticastSendReport $failedMulticastSendReport */
